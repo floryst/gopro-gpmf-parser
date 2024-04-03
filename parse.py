@@ -6,8 +6,8 @@ from pathlib import Path
 import io
 import struct
 import os
-from dataclasses import dataclass, asdict
-from typing import Iterable, List, Dict, Generator, Any
+from dataclasses import dataclass, asdict, field
+from typing import Iterable, List, Dict, Generator, Any, Tuple, Optional
 
 
 def unpack_stream(fmt, stream, peek=False):
@@ -500,6 +500,36 @@ gpmf_type_to_struct_fmt = {
 }
 
 
+@dataclass
+class Scaler:
+    # scale is a list of divisors
+    scale: List[float] = field(default_factory=lambda: [1])
+
+    @classmethod
+    def from_scal_gpmf(cls, fp: io.BufferedRandom, scal: Optional["GpmfEntry"]):
+        if not scal:
+            return cls()
+        return cls(list(scal.iter_samples(fp, apply_modifiers=False)))
+
+    def try_scale(self, it: Any):
+        """Tries to scale a given input.
+
+        If `it' is not a list of ints or floats, the input is passed through as-is.
+        """
+        if not any(isinstance(it, typ) for typ in (tuple, list)):
+            return it
+
+        output = []
+        for value in it:
+            if any(isinstance(value, typ) for typ in (int, float)):
+                output.append(value / self.scale[0])
+            elif any(isinstance(value, typ) for typ in [tuple, list]):
+                output.append(list(val / scal for val, scal in zip(value, self.scale)))
+            else:
+                output.append(value)
+        return output
+
+
 @dataclass(kw_only=True)
 class GpmfEntry:
     fourcc: bytes
@@ -509,6 +539,10 @@ class GpmfEntry:
     # offset in the stream where the data starts
     data_start_offset: int
     level: int = 0
+    # modifier properties as gpmf entries
+    scale: Optional["GpmfEntry"] = None
+    display_units: Optional["GpmfEntry"] = None
+    standard_units: Optional["GpmfEntry"] = None
 
     @property
     def data_size(self):
@@ -558,17 +592,26 @@ class GpmfEntry:
             yield result
             offset += self.sample_size
 
-    def iter_samples(self, reader: io.BufferedRandom) -> Generator[Any, None, None]:
+    def iter_samples(
+        self,
+        reader: io.BufferedRandom,
+        apply_modifiers=True,
+        collapse_single_result=True,
+    ) -> Generator[Any, None, None]:
         if self.is_nested or self.is_complex_type:
             return None
+
+        scaler = Scaler.from_scal_gpmf(reader, self.scale)
 
         struct_fmt = self._get_struct_fmt()
         for raw_sample in self.iter_raw_samples(reader):
             result = struct.unpack(struct_fmt, raw_sample)
             if not result:
                 return None
+            if apply_modifiers:
+                result = list(scaler.try_scale(result))
             # handles complex types that need to return multiple values
-            if len(result) == 1:
+            if collapse_single_result and len(result) == 1:
                 result = result[0]
             yield result
 
@@ -668,104 +711,215 @@ def parse_gpmf(
     yield from recurse_parser(start_offset)
 
 
-def main(file: Path):
-    with open(str(file), "rb") as fp:
-        moov = find_box_by_type("moov", iterboxes(fp))
-        if not moov:
-            raise RuntimeError("no moov box")
+def itersamples(fp: io.BufferedRandom, debug=False):
+    moov = find_box_by_type("moov", iterboxes(fp))
+    if not moov:
+        raise RuntimeError("no moov box")
 
-        for trak in iterboxes(fp, moov):
-            if trak.type != b"trak":
-                continue
+    for trak in iterboxes(fp, moov):
+        if trak.type != b"trak":
+            continue
 
-            mdia = find_box_by_type("mdia", iterboxes(fp, trak))
-            if not mdia:
-                continue
+        mdia = find_box_by_type("mdia", iterboxes(fp, trak))
+        if not mdia:
+            continue
 
-            hdlr: HandlerReferenceBox = find_box_by_type("hdlr", iterboxes(fp, mdia))
-            if not hdlr:
-                continue
+        hdlr: HandlerReferenceBox = find_box_by_type("hdlr", iterboxes(fp, mdia))
+        if not hdlr:
+            continue
 
-            if hdlr.handler_type != b"meta" or "GoPro MET" not in hdlr.name:
-                continue
+        if hdlr.handler_type != b"meta" or "GoPro MET" not in hdlr.name:
+            continue
 
-            mdhd: MediaHeaderBox = find_box_by_type("mdhd", iterboxes(fp, mdia))
-            if not mdhd:
-                continue
+        mdhd: MediaHeaderBox = find_box_by_type("mdhd", iterboxes(fp, mdia))
+        if not mdhd:
+            continue
 
-            minf = find_box_by_type("minf", iterboxes(fp, mdia))
-            if not minf:
-                continue
+        minf = find_box_by_type("minf", iterboxes(fp, mdia))
+        if not minf:
+            continue
 
-            gmhd = find_box_by_type("gmhd", iterboxes(fp, minf))
-            if not gmhd:
-                continue
+        gmhd = find_box_by_type("gmhd", iterboxes(fp, minf))
+        if not gmhd:
+            continue
 
-            # find gmin (media info) and gpmd (type for gpmf data)
-            # for box in iterboxes(fp, gmhd):
-            #   print("found:", box.type, box)
+        # find gmin (media info) and gpmd (type for gpmf data)
+        # for box in iterboxes(fp, gmhd):
+        #   print("found:", box.type, box)
 
-            stbl = find_box_by_type("stbl", iterboxes(fp, minf))
-            if not stbl:
-                continue
+        stbl = find_box_by_type("stbl", iterboxes(fp, minf))
+        if not stbl:
+            continue
 
-            stsd: SampleDescriptionBox = find_box_by_type("stsd", iterboxes(fp, stbl))
-            if not stsd:
-                continue
+        stsd: SampleDescriptionBox = find_box_by_type("stsd", iterboxes(fp, stbl))
+        if not stsd:
+            continue
 
-            if stsd.entry_count != 1:
-                continue
+        if stsd.entry_count != 1:
+            continue
 
-            gpmd = list(iterboxes(fp, stsd))[0]
-            if gpmd.type != b"gpmd":
-                continue
+        gpmd = list(iterboxes(fp, stsd))[0]
+        if gpmd.type != b"gpmd":
+            continue
 
-            stbl_boxes = iterboxes(fp, stbl)
-            stts: TimeToEntryBox = find_box_by_type("stts", stbl_boxes)
-            stsc: SampleToChunkBox = find_box_by_type("stsc", stbl_boxes)
-            stsz: SampleSizeBox = find_box_by_type("stsz", stbl_boxes)
-            stco: ChunkOffsetBox = find_box_by_type("stco", stbl_boxes)
-            if not (stts and stsc and stsz and stco):
-                continue
+        stbl_boxes = iterboxes(fp, stbl)
+        stts: TimeToEntryBox = find_box_by_type("stts", stbl_boxes)
+        stsc: SampleToChunkBox = find_box_by_type("stsc", stbl_boxes)
+        stsz: SampleSizeBox = find_box_by_type("stsz", stbl_boxes)
+        stco: ChunkOffsetBox = find_box_by_type("stco", stbl_boxes)
+        if not (stts and stsc and stsz and stco):
+            continue
 
+        if debug:
             print("Found GPMF track")
             print(f"Timescale: {mdhd.timescale}")
             print(f"Duration: {mdhd.duration}")
             print(f"There are {stco.entry_count} chunks")
             print(f"There are {stsz.sample_count} samples")
 
-            for sample_idx, (sample_offset, sample_size) in enumerate(
-                iter_sample_file_offset(stsz=stsz, stco=stco, stsc=stsc)
-            ):
-                print(
-                    f"Parsing sample {sample_idx} from {sample_offset} to {sample_offset + sample_size}"
+        for sample_offset, sample_size in iter_sample_file_offset(
+            stsz=stsz, stco=stco, stsc=stsc
+        ):
+            yield sample_offset, sample_size
+
+
+StreamType = Tuple[GpmfEntry, List[GpmfEntry]]
+
+
+def apply_modifier_properties(entries: List[GpmfEntry]):
+    """Applies modifier properties based on GPMF order.
+
+    Only applies: SCAL, UNIT, SIUN
+    """
+    scal, unit, siun = None, None, None
+    for entry in entries:
+        if entry.fourcc == b"SCAL":
+            scal = entry
+        elif entry.fourcc == b"UNIT":
+            unit = entry
+        elif entry.fourcc == b"SIUN":
+            siun = entry
+        else:
+            entry.scale = scal
+            entry.display_units = unit
+            entry.standard_units = siun
+    return entries
+
+
+def iter_gpmf_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
+    # List[Tuple[<STRM GpmfEntry>, List[GpmfEntry]]]
+    streams: List[StreamType] = []
+    for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
+        if not entry:
+            continue
+
+        cur_stream = streams[-1] if streams else None
+
+        if entry.fourcc.startswith(b"STRM"):
+            if cur_stream and cur_stream[0].level >= entry.level:
+                # exiting a nested stream
+                strm, entries = streams.pop()
+                yield strm, apply_modifier_properties(entries)
+            streams.append((entry, []))
+        elif cur_stream:
+            cur_stream[1].append(entry)
+
+
+def iter_gpmf_gps_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
+    for strm_entry, entries in iter_gpmf_streams(fp, sample_offset, sample_size):
+        if any(b"GPS" in entry.fourcc for entry in entries):
+            yield strm_entry, entries
+
+
+def print_gpmf_streams_from(iterable: Iterable[StreamType]):
+    for stream, entries in iterable:
+        print("  " * stream.level, stream)
+        for entry in entries:
+            print("  " * stream.level + "  ", entry)
+
+
+def print_gpmf_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
+    print_gpmf_streams_from(iter_gpmf_streams(fp, sample_offset, sample_size))
+
+
+def print_gpmf_samples(fp: io.BufferedRandom):
+    for sample_idx, (sample_offset, sample_size) in enumerate(
+        itersamples(fp, debug=True)
+    ):
+        print(
+            f"Parsing sample {sample_idx} from {sample_offset} to {sample_offset + sample_size}"
+        )
+        for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
+            if not entry:
+                continue
+
+            # if not entry.fourcc.startswith(b"GPS"):
+            #     continue
+
+            print(
+                "  " * entry.level,
+                entry,
+                f"data_size={entry.data_size}, end_offset_aligned={entry.data_end_offset_aligned}",
+            )
+
+            if entry.type == b"c":
+                # A SIUN of m/s^2 uses latin-1 encoding, NOT ASCII >:(
+                str_samples = map(
+                    lambda s: decode_nulterm_bytes(s, "latin-1"),
+                    entry.iter_samples(fp),
                 )
-                for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
-                    if not entry:
-                        continue
+                print(
+                    "  " * (entry.level + 1),
+                    f"Value: {list(str_samples)}",
+                )
+            elif not (entry.is_complex_type or entry.is_nested):
+                some_samples = itertools.islice(entry.iter_samples(fp), 5)
+                print("  " * (entry.level + 1), f"Value: {list(some_samples)}")
 
-                    if not entry.fourcc.startswith(b"GPS"):
-                        continue
 
-                    print(
-                        "  " * entry.level,
-                        entry,
-                        f"data_size={entry.data_size}, end_offset_aligned={entry.data_end_offset_aligned}",
-                    )
+@dataclass
+class GpsSample:
+    """Based on WGS84"""
 
-                    if entry.type == b"c":
-                        # A SIUN of m/s^2 uses latin-1 encoding, NOT ASCII >:(
-                        str_samples = map(
-                            lambda s: decode_nulterm_bytes(s, "latin-1"),
-                            entry.iter_samples(fp),
-                        )
-                        print(
-                            "  " * (entry.level + 1),
-                            f"Value: {list(str_samples)}",
-                        )
-                    elif not (entry.is_complex_type or entry.is_nested):
-                        some_samples = itertools.islice(entry.iter_samples(fp), 5)
-                        print("  " * (entry.level + 1), f"Value: {list(some_samples)}")
+    fix: int = 0
+    gps_timestamp: str = ""
+    precision: int = 0
+    # lat, long, alt, 2d speed, 3d speed
+    data: List[Tuple[float, float, float, float, float]] = field(default_factory=list)
+    units: List[str] = ""
+    # latitude: float = 0.0
+    # longitude: float = 0.0
+    # altitude: float = 0.0
+    # speed_2d: float = 0.0
+    # speed_3d: float = 0.0
+
+
+def get_gps_samples(fp: io.BufferedRandom):
+    samples: List[GpsSample] = []
+    for sample_idx, (sample_offset, sample_size) in enumerate(itersamples(fp)):
+        print(f"----- sample {sample_idx}")
+        # print_gpmf_streams_from(iter_gpmf_gps_streams(fp, sample_offset, sample_size))
+        for _, entries in iter_gpmf_gps_streams(fp, sample_offset, sample_size):
+            gps_sample = GpsSample()
+            for entry in entries:
+                print(entry)
+                if entry.fourcc == b"GPSF":
+                    gps_sample.fix = next(entry.iter_samples(fp))
+                elif entry.fourcc == b"GPSU":
+                    gps_sample.gps_timestamp = list(entry.iter_samples(fp))
+                elif entry.fourcc == b"GPSP":
+                    gps_sample.precision = next(entry.iter_samples(fp))
+                elif entry.fourcc == b"GPS5":
+                    gps_sample.data = list(entry.iter_samples(fp))
+            samples.append(gps_sample)
+            print(gps_sample)
+    return samples
+
+
+def main(file: Path):
+    with open(str(file), "rb") as fp:
+        # print_gpmf_samples(fp)
+        get_gps_samples(fp)
 
 
 main(Path(sys.argv[1]))
