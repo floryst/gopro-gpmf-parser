@@ -257,6 +257,13 @@ class TimeToEntryBox(FullBox):
             entry_sample_delta=sample_delta,
         )
 
+    def iter_sample_times(self):
+        ts = 0
+        for count, delta in zip(self.entry_sample_count, self.entry_sample_delta):
+            while count:
+                yield ts
+                ts += delta
+
 
 @dataclass(kw_only=True)
 class SampleToChunkBox(FullBox):
@@ -352,9 +359,10 @@ class SampleSizeBox(FullBox):
 
 
 @dataclass(kw_only=True)
-class ChunkOffsetBox(FullBox):
+class AbstractChunkOffsetBox(FullBox):
     entry_count: int
     entry_chunk_offset: List[int]
+    _chunk_offset_size: str = field(default="", init=False)
 
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
@@ -366,7 +374,7 @@ class ChunkOffsetBox(FullBox):
         count = result[0]
         chunk_offsets = []
         for _ in range(count):
-            result = unpack_stream(">I", reader)
+            result = unpack_stream(f">{cls._chunk_offset_size}", reader)
             if not result:
                 return None
             chunk_offsets.append(result[0])
@@ -379,6 +387,16 @@ class ChunkOffsetBox(FullBox):
             entry_count=count,
             entry_chunk_offset=chunk_offsets,
         )
+
+
+@dataclass(kw_only=True)
+class ChunkOffsetBox(AbstractChunkOffsetBox):
+    _chunk_offset_size = "I"
+
+
+@dataclass(kw_only=True)
+class ChunkLargeOffsetBox(AbstractChunkOffsetBox):
+    _chunk_offset_size = "Q"
 
 
 @dataclass(kw_only=True)
@@ -427,6 +445,7 @@ box_parsers: Dict[bytes, "Box"] = {
     b"stsc": SampleToChunkBox,
     b"stsz": SampleSizeBox,
     b"stco": ChunkOffsetBox,
+    b"co64": ChunkLargeOffsetBox,
     b"mdhd": MediaHeaderBox,
 }
 
@@ -467,11 +486,40 @@ def find_box_by_type(box_type: str | bytes, iterable: Iterable[Box]):
     return None
 
 
-def iter_sample_file_offset(
-    *, stsz: SampleSizeBox, stco: SampleToChunkBox, stsc: SampleToChunkBox
+@dataclass
+class Mp4Sample:
+    offset: int
+    size: int
+    decoding_time: int
+
+
+def iter_samples(
+    *,
+    stsz: SampleSizeBox,
+    cob: AbstractChunkOffsetBox,
+    stsc: SampleToChunkBox,
+    stts: TimeToEntryBox,
 ):
     sample_sizes_iter = stsz.iter_sample_sizes()
-    for idx, chunk_offset in enumerate(stco.entry_chunk_offset):
+    sample_times_iter = stts.iter_sample_times()
+    for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
+        samples_per_chunk = stsc.get_samples_per_chunk(idx)
+        sample_offset_in_chunk = 0
+        for _ in range(samples_per_chunk):
+            sample_size = next(sample_sizes_iter)
+            yield Mp4Sample(
+                offset=chunk_offset + sample_offset_in_chunk,
+                size=sample_size,
+                decoding_time=next(sample_times_iter),
+            )
+            sample_offset_in_chunk += sample_size
+
+
+def iter_sample_file_offset(
+    *, stsz: SampleSizeBox, cob: AbstractChunkOffsetBox, stsc: SampleToChunkBox
+):
+    sample_sizes_iter = stsz.iter_sample_sizes()
+    for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
         samples_per_chunk = stsc.get_samples_per_chunk(idx)
         sample_offset_in_chunk = 0
         for _ in range(samples_per_chunk):
@@ -534,7 +582,9 @@ class Scaler:
 class GpmfEntry:
     fourcc: bytes
     type: bytes
+    # size of each gpmf entry sample
     sample_size: int
+    # number of gpmf entry samples
     num_samples: int
     # offset in the stream where the data starts
     data_start_offset: int
@@ -762,25 +812,24 @@ def itersamples(fp: io.BufferedRandom, debug=False):
         if gpmd.type != b"gpmd":
             continue
 
-        stbl_boxes = iterboxes(fp, stbl)
-        stts: TimeToEntryBox = find_box_by_type("stts", stbl_boxes)
-        stsc: SampleToChunkBox = find_box_by_type("stsc", stbl_boxes)
-        stsz: SampleSizeBox = find_box_by_type("stsz", stbl_boxes)
-        stco: ChunkOffsetBox = find_box_by_type("stco", stbl_boxes)
-        if not (stts and stsc and stsz and stco):
+        stts: TimeToEntryBox = find_box_by_type("stts", iterboxes(fp, stbl))
+        stsc: SampleToChunkBox = find_box_by_type("stsc", iterboxes(fp, stbl))
+        stsz: SampleSizeBox = find_box_by_type("stsz", iterboxes(fp, stbl))
+        stco: ChunkOffsetBox = find_box_by_type("stco", iterboxes(fp, stbl))
+        co64: ChunkLargeOffsetBox = find_box_by_type("co64", iterboxes(fp, stbl))
+        cob: AbstractChunkOffsetBox = co64 or stco
+        if not (stts and stsc and stsz and cob):
             continue
 
         if debug:
             print("Found GPMF track")
             print(f"Timescale: {mdhd.timescale}")
             print(f"Duration: {mdhd.duration}")
-            print(f"There are {stco.entry_count} chunks")
+            print(f"There are {cob.entry_count} chunks")
             print(f"There are {stsz.sample_count} samples")
 
-        for sample_offset, sample_size in iter_sample_file_offset(
-            stsz=stsz, stco=stco, stsc=stsc
-        ):
-            yield sample_offset, sample_size
+        for sample in iter_samples(stsz=stsz, cob=cob, stsc=stsc, stts=stts):
+            yield sample
 
 
 StreamType = Tuple[GpmfEntry, List[GpmfEntry]]
@@ -806,10 +855,10 @@ def apply_modifier_properties(entries: List[GpmfEntry]):
     return entries
 
 
-def iter_gpmf_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
+def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
     # List[Tuple[<STRM GpmfEntry>, List[GpmfEntry]]]
     streams: List[StreamType] = []
-    for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
+    for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
         if not entry:
             continue
 
@@ -825,8 +874,8 @@ def iter_gpmf_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: in
             cur_stream[1].append(entry)
 
 
-def iter_gpmf_gps_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
-    for strm_entry, entries in iter_gpmf_streams(fp, sample_offset, sample_size):
+def iter_gpmf_gps_streams(fp: io.BufferedRandom, sample: Mp4Sample):
+    for strm_entry, entries in iter_gpmf_streams(fp, sample):
         if any(b"GPS" in entry.fourcc for entry in entries):
             yield strm_entry, entries
 
@@ -838,8 +887,8 @@ def print_gpmf_streams_from(iterable: Iterable[StreamType]):
             print("  " * stream.level + "  ", entry)
 
 
-def print_gpmf_streams(fp: io.BufferedRandom, sample_offset: int, sample_size: int):
-    print_gpmf_streams_from(iter_gpmf_streams(fp, sample_offset, sample_size))
+def print_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
+    print_gpmf_streams_from(iter_gpmf_streams(fp, sample))
 
 
 def print_gpmf_samples(fp: io.BufferedRandom):
@@ -852,9 +901,6 @@ def print_gpmf_samples(fp: io.BufferedRandom):
         for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
             if not entry:
                 continue
-
-            # if not entry.fourcc.startswith(b"GPS"):
-            #     continue
 
             print(
                 "  " * entry.level,
@@ -894,12 +940,12 @@ class GpsSample:
     # speed_3d: float = 0.0
 
 
-def get_gps_samples(fp: io.BufferedRandom):
+def get_gps_samples(fp: io.BufferedRandom, debug=False):
     samples: List[GpsSample] = []
-    for sample_idx, (sample_offset, sample_size) in enumerate(itersamples(fp)):
-        print(f"----- sample {sample_idx}")
-        # print_gpmf_streams_from(iter_gpmf_gps_streams(fp, sample_offset, sample_size))
-        for _, entries in iter_gpmf_gps_streams(fp, sample_offset, sample_size):
+    for sample_idx, sample in enumerate(itersamples(fp)):
+        if debug:
+            print(f"----- sample #{sample_idx} (time={sample.decoding_time})")
+        for _, entries in iter_gpmf_gps_streams(fp, sample):
             gps_sample = GpsSample()
             for entry in entries:
                 print(entry)
@@ -912,14 +958,15 @@ def get_gps_samples(fp: io.BufferedRandom):
                 elif entry.fourcc == b"GPS5":
                     gps_sample.data = list(entry.iter_samples(fp))
             samples.append(gps_sample)
-            print(gps_sample)
+            if debug:
+                print(gps_sample)
     return samples
 
 
 def main(file: Path):
     with open(str(file), "rb") as fp:
         # print_gpmf_samples(fp)
-        get_gps_samples(fp)
+        get_gps_samples(fp, debug=True)
 
 
 main(Path(sys.argv[1]))
