@@ -7,7 +7,36 @@ import io
 import struct
 import os
 from dataclasses import dataclass, asdict, field
+from collections.abc import Sequence
 from typing import Iterable, List, Dict, Generator, Any, Tuple, Optional
+
+
+class Q:
+    """Represents a quantity with a unit."""
+
+    value: float | int
+    unit: str
+
+    def __init__(self, value: float | int = 0, unit: str = ""):
+        self.value = value
+        self.unit = unit
+
+    @property
+    def v(self):
+        """Alias for q.value"""
+        return self.value
+
+    @v.setter
+    def set_v(self, v: float | int):
+        self.value = v
+
+    @property
+    def is_dimensionless(self):
+        """Is the quantity dimensionless"""
+        return not self.unit
+
+    def __repr__(self) -> str:
+        return f"Q({self.v} {self.unit or '(none)'})"
 
 
 def unpack_stream(fmt, stream, peek=False):
@@ -616,6 +645,22 @@ class GpmfEntry:
     def is_complex_type(self):
         return self.type == b"?"
 
+    @property
+    def units(self):
+        """Prefers display units, then standard units"""
+        return self.display_units or self.standard_units
+
+    def get_unit(self, index: int, reader: io.BufferedRandom, encoding="utf-8"):
+        """Gets a unit for index I of an N-tuple sample."""
+        if not self.units:
+            return ""
+        try:
+            return decode_nulterm_bytes(
+                list(self.units.iter_samples(reader))[index], encoding=encoding
+            )
+        except IndexError:
+            return ""
+
     def _get_struct_fmt(self):
         fmt = gpmf_type_to_struct_fmt[self.type[0]]
         fmt_size = struct.calcsize(fmt)
@@ -927,17 +972,18 @@ def print_gpmf_samples(fp: io.BufferedRandom):
 class GpsSample:
     """Based on WGS84"""
 
+    @dataclass
+    class DataPoint:
+        latitude: Q = field(default_factory=Q)
+        longitude: Q = field(default_factory=Q)
+        altitude: Q = field(default_factory=Q)
+        speed_2d: Q = field(default_factory=Q)
+        speed_3d: Q = field(default_factory=Q)
+
     fix: int = 0
     gps_timestamp: str = ""
     precision: int = 0
-    # lat, long, alt, 2d speed, 3d speed
-    data: List[Tuple[float, float, float, float, float]] = field(default_factory=list)
-    units: List[str] = ""
-    # latitude: float = 0.0
-    # longitude: float = 0.0
-    # altitude: float = 0.0
-    # speed_2d: float = 0.0
-    # speed_3d: float = 0.0
+    data: Sequence[DataPoint] = field(default_factory=list)
 
 
 def get_gps_samples(fp: io.BufferedRandom, debug=False):
@@ -956,7 +1002,18 @@ def get_gps_samples(fp: io.BufferedRandom, debug=False):
                 elif entry.fourcc == b"GPSP":
                     gps_sample.precision = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPS5":
-                    gps_sample.data = list(entry.iter_samples(fp))
+                    for gpmf_sample in entry.iter_samples(fp):
+                        if len(gpmf_sample) != 5:
+                            raise ValueError(
+                                f"Received GPS5 sample with {len(gpmf_sample)} values!"
+                            )
+                        gps_sample.data = GpsSample.DataPoint(
+                            longitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
+                            latitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
+                            altitude=Q(gpmf_sample[2], entry.get_unit(2, fp)),
+                            speed_2d=Q(gpmf_sample[3], entry.get_unit(3, fp)),
+                            speed_3d=Q(gpmf_sample[4], entry.get_unit(4, fp)),
+                        )
             samples.append(gps_sample)
             if debug:
                 print(gps_sample)
