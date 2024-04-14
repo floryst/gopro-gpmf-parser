@@ -1,25 +1,24 @@
+import argparse
 import bisect
-import itertools
-import sys
-import math
-from pathlib import Path
 import io
-import struct
+import itertools
+import json
+import math
 import os
-from dataclasses import dataclass, asdict, field
+import struct
+import sys
 from collections.abc import Sequence
-from typing import Iterable, List, Dict, Generator, Any, Tuple, Optional
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 
+@dataclass
 class Q:
     """Represents a quantity with a unit."""
 
-    value: float | int
-    unit: str
-
-    def __init__(self, value: float | int = 0, unit: str = ""):
-        self.value = value
-        self.unit = unit
+    value: float | int = 0
+    unit: str = ""
 
     @property
     def v(self):
@@ -937,13 +936,11 @@ def print_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
 
 
 def print_gpmf_samples(fp: io.BufferedRandom):
-    for sample_idx, (sample_offset, sample_size) in enumerate(
-        itersamples(fp, debug=True)
-    ):
+    for sample_idx, sample in enumerate(itersamples(fp, debug=True)):
         print(
-            f"Parsing sample {sample_idx} from {sample_offset} to {sample_offset + sample_size}"
+            f"Parsing sample {sample_idx} from {sample.offset} to {sample.offset + sample.size}"
         )
-        for entry in parse_gpmf(fp, sample_offset, sample_offset + sample_size):
+        for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
             if not entry:
                 continue
 
@@ -981,6 +978,7 @@ class GpsSample:
         speed_3d: Q = field(default_factory=Q)
 
     fix: int = 0
+    video_time_offset: int = 0
     gps_timestamp: str = ""
     precision: int = 0
     data: Sequence[DataPoint] = field(default_factory=list)
@@ -992,14 +990,20 @@ def get_gps_samples(fp: io.BufferedRandom, debug=False):
         if debug:
             print(f"----- sample #{sample_idx} (time={sample.decoding_time})")
         for _, entries in iter_gpmf_gps_streams(fp, sample):
-            gps_sample = GpsSample()
+            gps_sample = GpsSample(video_time_offset=sample.decoding_time)
             for entry in entries:
-                print(entry)
+                if debug:
+                    print(entry)
                 if entry.fourcc == b"GPSF":
+                    # should be a single sample
                     gps_sample.fix = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPSU":
-                    gps_sample.gps_timestamp = list(entry.iter_samples(fp))
+                    # should be a single sample. ASCII is simple enough for numbers.
+                    gps_sample.gps_timestamp = next(entry.iter_samples(fp)).decode(
+                        "ascii"
+                    )
                 elif entry.fourcc == b"GPSP":
+                    # should be a single sample
                     gps_sample.precision = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPS5":
                     for gpmf_sample in entry.iter_samples(fp):
@@ -1020,10 +1024,31 @@ def get_gps_samples(fp: io.BufferedRandom, debug=False):
     return samples
 
 
-def main(file: Path):
-    with open(str(file), "rb") as fp:
-        # print_gpmf_samples(fp)
-        get_gps_samples(fp, debug=True)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", type=str, help="print | gps-json")
+    parser.add_argument("file", type=str, help="MP4 file to parse")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Enable debug output",
+    )
+    return parser.parse_args()
 
 
-main(Path(sys.argv[1]))
+def main(args):
+    with open(args.file, "rb") as fp:
+        if args.command == "print":
+            print_gpmf_samples(fp)
+        elif args.command == "gps-json":
+            gps_samples = get_gps_samples(fp, debug=args.debug)
+            # all of our data model is represented with dataclasses, so
+            # asdict() works here.
+            print(json.dumps(gps_samples, indent=2, default=asdict))
+        else:
+            raise ValueError(f"Invalid command: {args.command}")
+
+
+if __name__ == "__main__":
+    main(parse_args())
