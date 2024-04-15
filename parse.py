@@ -932,7 +932,7 @@ def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
     """Iterate over all GPMF Streams."""
     # Sequence[Tuple[<STRM GpmfEntry>, Sequence[GpmfEntry]]]
     streams: Sequence[StreamType] = []
-    for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
+    for entry in parse_gpmf(fp, sample.offset):
         if not entry:
             continue
 
@@ -940,8 +940,10 @@ def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
 
         if entry.fourcc.startswith(b"STRM"):
             if (
-                cur_stream and cur_stream[0].level >= entry.level
-            ):  # pylint: disable=unsubscriptable-object
+                cur_stream
+                and cur_stream[0].level  # pylint: disable=unsubscriptable-object
+                >= entry.level
+            ):
                 # exiting a nested stream
                 strm, entries = streams.pop()
                 yield strm, apply_modifier_properties(entries)
@@ -973,7 +975,7 @@ def print_gpmf_samples(fp: io.BufferedRandom):
         print(
             f"Parsing sample {sample_idx} from {sample.offset} to {sample.offset + sample.size}"
         )
-        for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
+        for entry in parse_gpmf(fp, sample.offset):
             if not entry:
                 continue
 
@@ -1079,7 +1081,7 @@ def analyze_gps_frames(frames: Sequence[GpsFrame]):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", type=str, help="print | gps-json")
+    parser.add_argument("command", type=str, help="print | gps-json | gps-analyze")
     parser.add_argument("file", type=str, help="MP4 file to parse")
     parser.add_argument(
         "--debug",
