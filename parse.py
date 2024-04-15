@@ -6,10 +6,8 @@ import json
 import math
 import os
 import struct
-import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
 
@@ -51,13 +49,15 @@ def unpack_stream(fmt, stream, peek=False):
 
 
 def decode_nulterm_bytes(b: bytes, encoding="utf-8"):
+    """Decodes a null-terminated string in a bytes sequence."""
     idx = b.find(b"\x00")
     if idx == -1:
         idx = len(b)
     return b[:idx].decode(encoding)
 
 
-def read_nulterm_utf8(stream):
+def read_nulterm_utf8(stream: io.BufferedReader):
+    """Reads a null-terminated utf8 string from a stream.."""
     sequence = bytearray()
     while True:
         result = unpack_stream(">B", stream)
@@ -72,6 +72,8 @@ def read_nulterm_utf8(stream):
 
 @dataclass
 class BoxHeader:
+    """Represents an MP4 box header."""
+
     size: int
     type: bytes
     start: int
@@ -83,6 +85,7 @@ class BoxHeader:
 
 
 def read_box_header(reader: io.BufferedRandom):
+    """Reads the box header at the current reader position."""
     box_start = reader.tell()
 
     result = unpack_stream(">I", reader)
@@ -480,6 +483,7 @@ box_parsers: Dict[bytes, "Box"] = {
 
 @staticmethod
 def parse_box(reader: io.BufferedReader):
+    """Parses an MP4 Box."""
     hdr = read_box_header(reader)
     if not hdr:
         return None
@@ -493,6 +497,7 @@ def parse_box(reader: io.BufferedReader):
 
 
 def iterboxes(reader: io.BufferedRandom, container: Box = None) -> Iterable[Box]:
+    """Iterates over MP4 boxes."""
     limit = math.inf
     if container:
         limit = container.header.box_end
@@ -516,6 +521,8 @@ def find_box_by_type(box_type: str | bytes, iterable: Iterable[Box]):
 
 @dataclass
 class Mp4Sample:
+    """Represents an MP4 track sample."""
+
     offset: int
     size: int
     decoding_time: int
@@ -547,6 +554,10 @@ def iter_track_samples(
 def iter_sample_file_offset(
     *, stsz: SampleSizeBox, cob: AbstractChunkOffsetBox, stsc: SampleToChunkBox
 ):
+    """Iterates over the track sample's position + size in an MP4 file.
+
+    Samples are defined by the stsz, cob, and stsc boxes.
+    """
     sample_sizes_iter = stsz.iter_sample_sizes()
     for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
         samples_per_chunk = stsc.get_samples_per_chunk(idx)
@@ -579,11 +590,14 @@ gpmf_type_to_struct_fmt = {
 
 @dataclass
 class Scaler:
+    """Helper class to scale values."""
+
     # scale is a list of divisors
     scale: List[float] = field(default_factory=lambda: [1])
 
     @classmethod
     def from_scal_gpmf(cls, fp: io.BufferedRandom, scal: Optional["GpmfEntry"]):
+        """Construct a Scaler from a GPMF SCAL entry."""
         if not scal:
             return cls()
         return cls(list(scal.iter_samples(fp, apply_modifiers=False)))
@@ -609,6 +623,8 @@ class Scaler:
 
 @dataclass(kw_only=True)
 class GpmfEntry:
+    """Represents a GPMF entry/frame."""
+
     fourcc: bytes
     type: bytes
     # size of each gpmf entry sample
@@ -673,10 +689,15 @@ class GpmfEntry:
         return f">{fmt}"
 
     def get_data_buffer(self, reader: io.BufferedRandom) -> bytes:
+        """Gets the raw data buffer for this GPMF entry/frame."""
         reader.seek(self.data_start_offset)
         return reader.read(self.data_size)
 
     def iter_raw_samples(self, reader: io.BufferedRandom) -> Generator[Any, None, None]:
+        """Iterates over the samples in a GPMF entry/frame.
+
+        No type processing or scaling is done; raw bytes are yielded.
+        """
         if self.is_nested or self.is_complex_type:
             return None
 
@@ -693,6 +714,7 @@ class GpmfEntry:
         apply_modifiers=True,
         collapse_single_result=True,
     ) -> Generator[Any, None, None]:
+        """Iterates over the samples in a GPMF entry/frame."""
         if self.is_nested or self.is_complex_type:
             return None
 
@@ -713,6 +735,8 @@ class GpmfEntry:
 
 @dataclass(kw_only=True)
 class ComplexGpmfEntry(GpmfEntry):
+    """A GPMF entry with a complex type."""
+
     complex_type: bytes
 
     def _get_struct_fmt(self):
@@ -720,6 +744,7 @@ class ComplexGpmfEntry(GpmfEntry):
 
 
 def read_gpmf_entry(reader: io.BufferedRandom, pos: int, level=0):
+    """Reads a GPMF entry at a given position."""
     reader.seek(pos)
     result = unpack_stream(">4scBH", reader)
     if not result:
@@ -737,6 +762,7 @@ def read_gpmf_entry(reader: io.BufferedRandom, pos: int, level=0):
 
 
 def unpack_type_specifier(struct_specifier: bytes):
+    """Unpacks the packed GPMF complex type specifier."""
     specifier_iter = iter(struct_specifier)
     unpacked = bytearray()
 
@@ -776,8 +802,9 @@ def unpack_type_specifier(struct_specifier: bytes):
 
 
 def parse_gpmf(
-    reader: io.BufferedRandom, start_offset: int, end_offset: int
+    reader: io.BufferedRandom, start_offset: int
 ) -> Generator[GpmfEntry | None, None, None]:
+    """Iterates over the GPMF entries in a file, starting at start_offset."""
 
     def recurse_parser(start: int, level=0) -> Generator[GpmfEntry, None, None]:
         entry = read_gpmf_entry(reader, start, level=level)
@@ -807,6 +834,7 @@ def parse_gpmf(
 
 
 def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
+    """Iterate over the track samples in the GoPro META track."""
     moov = find_box_by_type("moov", iterboxes(fp))
     if not moov:
         raise RuntimeError("no moov box")
@@ -901,6 +929,7 @@ def apply_modifier_properties(entries: List[GpmfEntry]):
 
 
 def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
+    """Iterate over all GPMF Streams."""
     # Sequence[Tuple[<STRM GpmfEntry>, Sequence[GpmfEntry]]]
     streams: Sequence[StreamType] = []
     for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
@@ -922,6 +951,7 @@ def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
 
 
 def iter_gpmf_gps_streams(fp: io.BufferedRandom, sample: Mp4Sample):
+    """Iterate over GPMF Streams that contain GPS child entries."""
     for strm_entry, entries in iter_gpmf_streams(fp, sample):
         if any(b"GPS" in entry.fourcc for entry in entries):
             yield strm_entry, entries
@@ -970,10 +1000,12 @@ def print_gpmf_samples(fp: io.BufferedRandom):
 
 @dataclass
 class GpsFrame:
-    """Based on WGS84. Represents a GPMF frame containing GPS samples."""
+    """Based on WGS84. Represents a GPMF stream "frame" containing GPS samples."""
 
     @dataclass
     class Sample:
+        """A GPS sample inside a GPS5 GPMF entry."""
+
         latitude: Q = field(default_factory=Q)
         longitude: Q = field(default_factory=Q)
         altitude: Q = field(default_factory=Q)
@@ -988,6 +1020,7 @@ class GpsFrame:
 
 
 def get_gps_frames(fp: io.BufferedRandom, debug=False):
+    """Reads out the GPS frames from a GoPro MP4."""
     frames: List[GpsFrame] = []
     for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp)):
         if debug:
