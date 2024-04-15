@@ -521,13 +521,14 @@ class Mp4Sample:
     decoding_time: int
 
 
-def iter_samples(
+def iter_track_samples(
     *,
     stsz: SampleSizeBox,
     cob: AbstractChunkOffsetBox,
     stsc: SampleToChunkBox,
     stts: TimeToEntryBox,
 ):
+    """Iterate over the mp4 track's samples."""
     sample_sizes_iter = stsz.iter_sample_sizes()
     sample_times_iter = stts.iter_sample_times()
     for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
@@ -805,7 +806,7 @@ def parse_gpmf(
     yield from recurse_parser(start_offset)
 
 
-def itersamples(fp: io.BufferedRandom, debug=False):
+def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
     moov = find_box_by_type("moov", iterboxes(fp))
     if not moov:
         raise RuntimeError("no moov box")
@@ -872,7 +873,7 @@ def itersamples(fp: io.BufferedRandom, debug=False):
             print(f"There are {cob.entry_count} chunks")
             print(f"There are {stsz.sample_count} samples")
 
-        for sample in iter_samples(stsz=stsz, cob=cob, stsc=stsc, stts=stts):
+        for sample in iter_track_samples(stsz=stsz, cob=cob, stsc=stsc, stts=stts):
             yield sample
 
 
@@ -900,8 +901,8 @@ def apply_modifier_properties(entries: List[GpmfEntry]):
 
 
 def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
-    # List[Tuple[<STRM GpmfEntry>, List[GpmfEntry]]]
-    streams: List[StreamType] = []
+    # Sequence[Tuple[<STRM GpmfEntry>, Sequence[GpmfEntry]]]
+    streams: Sequence[StreamType] = []
     for entry in parse_gpmf(fp, sample.offset, sample.offset + sample.size):
         if not entry:
             continue
@@ -909,13 +910,15 @@ def iter_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
         cur_stream = streams[-1] if streams else None
 
         if entry.fourcc.startswith(b"STRM"):
-            if cur_stream and cur_stream[0].level >= entry.level:
+            if (
+                cur_stream and cur_stream[0].level >= entry.level
+            ):  # pylint: disable=unsubscriptable-object
                 # exiting a nested stream
                 strm, entries = streams.pop()
                 yield strm, apply_modifier_properties(entries)
             streams.append((entry, []))
         elif cur_stream:
-            cur_stream[1].append(entry)
+            cur_stream[1].append(entry)  # pylint: disable=unsubscriptable-object
 
 
 def iter_gpmf_gps_streams(fp: io.BufferedRandom, sample: Mp4Sample):
@@ -936,7 +939,7 @@ def print_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
 
 
 def print_gpmf_samples(fp: io.BufferedRandom):
-    for sample_idx, sample in enumerate(itersamples(fp, debug=True)):
+    for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp, debug=True)):
         print(
             f"Parsing sample {sample_idx} from {sample.offset} to {sample.offset + sample.size}"
         )
@@ -966,11 +969,11 @@ def print_gpmf_samples(fp: io.BufferedRandom):
 
 
 @dataclass
-class GpsSample:
-    """Based on WGS84"""
+class GpsFrame:
+    """Based on WGS84. Represents a GPMF frame containing GPS samples."""
 
     @dataclass
-    class DataPoint:
+    class Sample:
         latitude: Q = field(default_factory=Q)
         longitude: Q = field(default_factory=Q)
         altitude: Q = field(default_factory=Q)
@@ -981,39 +984,39 @@ class GpsSample:
     video_time_offset: int = 0
     gps_timestamp: str = ""
     precision: int = 0
-    data: Sequence[DataPoint] = field(default_factory=list)
+    data: Sequence[Sample] = field(default_factory=list)
 
 
-def get_gps_samples(fp: io.BufferedRandom, debug=False):
-    samples: List[GpsSample] = []
-    for sample_idx, sample in enumerate(itersamples(fp)):
+def get_gps_frames(fp: io.BufferedRandom, debug=False):
+    frames: List[GpsFrame] = []
+    for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp)):
         if debug:
             print(f"----- sample #{sample_idx} (time={sample.decoding_time})")
         for _, entries in iter_gpmf_gps_streams(fp, sample):
-            gps_sample = GpsSample(video_time_offset=sample.decoding_time)
+            gps_frame = GpsFrame(video_time_offset=sample.decoding_time)
             for entry in entries:
                 if debug:
                     print(entry)
                 if entry.fourcc == b"GPSF":
                     # should be a single sample
-                    gps_sample.fix = next(entry.iter_samples(fp))
+                    gps_frame.fix = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPSU":
                     # should be a single sample. ASCII is simple enough for numbers.
-                    gps_sample.gps_timestamp = next(entry.iter_samples(fp)).decode(
+                    gps_frame.gps_timestamp = next(entry.iter_samples(fp)).decode(
                         "ascii"
                     )
                 elif entry.fourcc == b"GPSP":
                     # should be a single sample
-                    gps_sample.precision = next(entry.iter_samples(fp))
+                    gps_frame.precision = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPS5":
-                    gps_sample.data = []
+                    gps_frame.data = []
                     for gpmf_sample in entry.iter_samples(fp):
                         if len(gpmf_sample) != 5:
                             raise ValueError(
                                 f"Received GPS5 sample with {len(gpmf_sample)} values!"
                             )
-                        gps_sample.data.append(
-                            GpsSample.DataPoint(
+                        gps_frame.data.append(
+                            GpsFrame.Sample(
                                 longitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
                                 latitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
                                 altitude=Q(gpmf_sample[2], entry.get_unit(2, fp)),
@@ -1021,22 +1024,22 @@ def get_gps_samples(fp: io.BufferedRandom, debug=False):
                                 speed_3d=Q(gpmf_sample[4], entry.get_unit(4, fp)),
                             )
                         )
-            samples.append(gps_sample)
+            frames.append(gps_frame)
             if debug:
-                print(gps_sample)
-    return samples
+                print(gps_frame)
+    return frames
 
 
-def analyze_gps_samples(samples: Sequence[GpsSample]):
-    if len(samples) == 0:
-        print("No samples")
+def analyze_gps_frames(frames: Sequence[GpsFrame]):
+    if len(frames) == 0:
+        print("No GPS frames")
         return
 
     # adds an extra second, since the last sample presumably
     # runs until the end of the second.
-    end_time = samples[-1].video_time_offset / 1000 + 1
+    end_time = frames[-1].video_time_offset / 1000 + 1
     gps_data_count = 0
-    for sample in samples:
+    for sample in frames:
         gps_data_count += len(sample.data)
     print(f"Measured frequency (targeting ~18Hz): {gps_data_count / end_time:.2f}Hz")
 
@@ -1059,13 +1062,13 @@ def main(args):
         if args.command == "print":
             print_gpmf_samples(fp)
         elif args.command == "gps-analyze":
-            gps_samples = get_gps_samples(fp, debug=args.debug)
-            analyze_gps_samples(gps_samples)
+            gps_frames = get_gps_frames(fp, debug=args.debug)
+            analyze_gps_frames(gps_frames)
         elif args.command == "gps-json":
-            gps_samples = get_gps_samples(fp, debug=args.debug)
+            gps_frames = get_gps_frames(fp, debug=args.debug)
             # all of our data model is represented with dataclasses, so
             # asdict() works here.
-            print(json.dumps(gps_samples, indent=2, default=asdict))
+            print(json.dumps(gps_frames, indent=2, default=asdict))
         else:
             raise ValueError(f"Invalid command: {args.command}")
 
