@@ -6,6 +6,7 @@ import json
 import math
 import os
 import struct
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
@@ -1074,9 +1075,17 @@ def analyze_gps_frames(frames: Sequence[GpsFrame]):
     # runs until the end of the second.
     end_time = frames[-1].video_time_offset / 1000 + 1
     gps_data_count = 0
+    per_frame_gps_data_count = Counter()
+
     for sample in frames:
         gps_data_count += len(sample.data)
+        per_frame_gps_data_count[len(sample.data)] += 1
+
     print(f"Measured frequency (targeting ~18Hz): {gps_data_count / end_time:.2f}Hz")
+    print(
+        "Samples per frame -> count of frames w/ that # of samples:",
+        per_frame_gps_data_count,
+    )
 
 
 def parse_args():
