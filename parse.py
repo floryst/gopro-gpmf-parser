@@ -1006,22 +1006,39 @@ def get_gps_samples(fp: io.BufferedRandom, debug=False):
                     # should be a single sample
                     gps_sample.precision = next(entry.iter_samples(fp))
                 elif entry.fourcc == b"GPS5":
+                    gps_sample.data = []
                     for gpmf_sample in entry.iter_samples(fp):
                         if len(gpmf_sample) != 5:
                             raise ValueError(
                                 f"Received GPS5 sample with {len(gpmf_sample)} values!"
                             )
-                        gps_sample.data = GpsSample.DataPoint(
-                            longitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
-                            latitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
-                            altitude=Q(gpmf_sample[2], entry.get_unit(2, fp)),
-                            speed_2d=Q(gpmf_sample[3], entry.get_unit(3, fp)),
-                            speed_3d=Q(gpmf_sample[4], entry.get_unit(4, fp)),
+                        gps_sample.data.append(
+                            GpsSample.DataPoint(
+                                longitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
+                                latitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
+                                altitude=Q(gpmf_sample[2], entry.get_unit(2, fp)),
+                                speed_2d=Q(gpmf_sample[3], entry.get_unit(3, fp)),
+                                speed_3d=Q(gpmf_sample[4], entry.get_unit(4, fp)),
+                            )
                         )
             samples.append(gps_sample)
             if debug:
                 print(gps_sample)
     return samples
+
+
+def analyze_gps_samples(samples: Sequence[GpsSample]):
+    if len(samples) == 0:
+        print("No samples")
+        return
+
+    # adds an extra second, since the last sample presumably
+    # runs until the end of the second.
+    end_time = samples[-1].video_time_offset / 1000 + 1
+    gps_data_count = 0
+    for sample in samples:
+        gps_data_count += len(sample.data)
+    print(f"Measured frequency (targeting ~18Hz): {gps_data_count / end_time:.2f}Hz")
 
 
 def parse_args():
@@ -1041,6 +1058,9 @@ def main(args):
     with open(args.file, "rb") as fp:
         if args.command == "print":
             print_gpmf_samples(fp)
+        elif args.command == "gps-analyze":
+            gps_samples = get_gps_samples(fp, debug=args.debug)
+            analyze_gps_samples(gps_samples)
         elif args.command == "gps-json":
             gps_samples = get_gps_samples(fp, debug=args.debug)
             # all of our data model is represented with dataclasses, so
