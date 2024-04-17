@@ -1,11 +1,14 @@
 #+title: GPMF parser
 
 * Parser usage
+Install and initialize the poetry environment.
+
 #+begin_example
-./parse.py print | gps-json | gps-analyze
+poetry run python ./parse.py print | gps-json | gps-analyze | gps-flatbuffers
   print: outputs the GPMF frames to stdout
   gps-json: outputs GPS stream frames as JSON to stdout
   gps-analyze: outputs human-readable GPS stats
+  gps-flatbuffers: outputs a flatbuffer representation of the GPS info.
 #+end_example
 
 * GPS data in flatbuffers
