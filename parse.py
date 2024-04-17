@@ -1099,46 +1099,41 @@ def write_to_flatbuffer(gps_frames: Sequence[GpsFrame]):
 
     # build inner structures before container structures
 
-    seq_of_frame_samples = []
+    sample_vector_per_frame = []
     for frame in gps_frames:
-        frame_samples = []
-        seq_of_frame_samples.append(frame_samples)
-        for gps_sample in frame.data:
-            sample = GoPro.GpsSample.CreateGpsSample(
+        GoPro.GpsFrame.StartDataVector(builder, len(frame.data))
+        # prepend inline structs
+        for gps_sample in frame.data[::-1]:
+            # a vector of structs follows a different pattern than
+            # a vector of tables. structs are stored inline rather
+            # than by a pointer. Both should be stored in reverse.
+            GoPro.GpsSample.CreateGpsSample(
                 builder,
-                gps_sample.latitude.v,
-                gps_sample.longitude.v,
-                gps_sample.altitude.v,
-                gps_sample.speed_2d.v,
-                gps_sample.speed_3d.v,
+                float(gps_sample.latitude.v),
+                float(gps_sample.longitude.v),
+                float(gps_sample.altitude.v),
+                float(gps_sample.speed_2d.v),
+                float(gps_sample.speed_3d.v),
             )
-            frame_samples.append(sample)
+        sample_vector_per_frame.append(builder.EndVector())
 
-    frame_data_vectors = []
-    for frame_samples in seq_of_frame_samples:
-        GoPro.GpsFrame.StartDataVector(builder, len(frame_samples))
-        # prepend vector items in reverse order
-        for sample in frame_samples[::-1]:
-            builder.PrependUOffsetTRelative(sample)
-        frame_data_vectors.append(builder.EndVector())
-
-    seq_of_frames = []
-    for data_vector, gps_frame in zip(frame_data_vectors, gps_frames):
+    frame_vector = []
+    for sample_vector, gps_frame in zip(sample_vector_per_frame, gps_frames):
         GoPro.GpsFrame.GpsFrameStart(builder)
         GoPro.GpsFrame.AddFix(builder, int(gps_frame.fix))
         GoPro.GpsFrame.AddPrecision(builder, gps_frame.precision)
-        GoPro.GpsFrame.AddData(builder, data_vector)
-        seq_of_frames.append(GoPro.GpsFrame.GpsFrameEnd(builder))
+        GoPro.GpsFrame.AddData(builder, sample_vector)
+        frame_vector.append(GoPro.GpsFrame.GpsFrameEnd(builder))
 
     track_samples = []
-    for frame, gps_frame in zip(seq_of_frames, gps_frames):
+    for frame, gps_frame in zip(frame_vector, gps_frames):
         GoPro.TrackSample.TrackSampleStart(builder)
         GoPro.TrackSample.AddDecodingTime(builder, gps_frame.video_time_offset)
         GoPro.TrackSample.AddGps(builder, frame)
         track_samples.append(GoPro.TrackSample.TrackSampleEnd(builder))
 
     GoPro.MetaTrack.StartSamplesVector(builder, len(track_samples))
-    # prepend vector items in reverse order
+    # for a vector of tables, prepend table pointers in reverse order
     for track_sample in track_samples[::-1]:
         builder.PrependUOffsetTRelative(track_sample)
     track_samples_vector = builder.EndVector()
