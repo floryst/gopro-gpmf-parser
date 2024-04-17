@@ -1,0 +1,21 @@
+#+title: GPMF parser
+
+* Parser usage
+#+begin_example
+./parse.py print | gps-json | gps-analyze
+  print: outputs the GPMF frames to stdout
+  gps-json: outputs GPS stream frames as JSON to stdout
+  gps-analyze: outputs human-readable GPS stats
+#+end_example
+
+* GPS data in flatbuffers
+Flatbuffers provide a zero-copy means of packing, transmitting and reading the GPS data, since the JSON encoding is a lot of data.
+** Building flatbuffers
+#+begin_example
+cd flatbuffers/
+podman build -t flatbuffers:24.3.25 .
+#+end_example
+** Running flatbuffers
+#+begin_example
+podman run --rm -it -v "$PWD:/src" flatbuffers:24.3.25 /usr/bin/flatc --python --ts /src/schema.fbs
+#+end_example

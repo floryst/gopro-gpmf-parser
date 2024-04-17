@@ -1,0 +1,31 @@
+namespace GoPro;
+
+// structs are great for fixed-sized objects, so no strings or vectors.
+// flatbuffers will inline these instead of creating a table entry.
+struct GpsSample {
+    // implicit units
+    latitude:float; // deg
+    longitude:float; // deg
+    altitude:float; // m
+    speed_2d:float; // m/s
+    speed_3d:float; // m/s
+}
+
+table GpsFrame {
+    fix:ubyte;
+    // unused for now
+    //timestamp:string;
+    precision:float;
+    data:[GpsSample];
+}
+
+table TrackSample {
+    decoding_time:uint32;
+    gps:GpsFrame;
+}
+
+table MetaTrack {
+    samples:[TrackSample];
+}
+
+root_type MetaTrack;

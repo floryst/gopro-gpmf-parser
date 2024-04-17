@@ -1088,33 +1088,132 @@ def analyze_gps_frames(frames: Sequence[GpsFrame]):
     )
 
 
+def write_to_flatbuffer(gps_frames: Sequence[GpsFrame]):
+    import GoPro.MetaTrack
+    import GoPro.TrackSample
+    import GoPro.GpsFrame
+    import GoPro.GpsSample
+    import flatbuffers
+
+    builder = flatbuffers.Builder(0)
+
+    # build inner structures before container structures
+
+    seq_of_frame_samples = []
+    for frame in gps_frames:
+        frame_samples = []
+        seq_of_frame_samples.append(frame_samples)
+        for gps_sample in frame.data:
+            sample = GoPro.GpsSample.CreateGpsSample(
+                builder,
+                gps_sample.latitude.v,
+                gps_sample.longitude.v,
+                gps_sample.altitude.v,
+                gps_sample.speed_2d.v,
+                gps_sample.speed_3d.v,
+            )
+            frame_samples.append(sample)
+
+    frame_data_vectors = []
+    for frame_samples in seq_of_frame_samples:
+        GoPro.GpsFrame.StartDataVector(builder, len(frame_samples))
+        # prepend vector items in reverse order
+        for sample in frame_samples[::-1]:
+            builder.PrependUOffsetTRelative(sample)
+        frame_data_vectors.append(builder.EndVector())
+
+    seq_of_frames = []
+    for data_vector, gps_frame in zip(frame_data_vectors, gps_frames):
+        GoPro.GpsFrame.GpsFrameStart(builder)
+        GoPro.GpsFrame.AddFix(builder, int(gps_frame.fix))
+        GoPro.GpsFrame.AddPrecision(builder, gps_frame.precision)
+        GoPro.GpsFrame.AddData(builder, data_vector)
+        seq_of_frames.append(GoPro.GpsFrame.GpsFrameEnd(builder))
+
+    track_samples = []
+    for frame, gps_frame in zip(seq_of_frames, gps_frames):
+        GoPro.TrackSample.TrackSampleStart(builder)
+        GoPro.TrackSample.AddDecodingTime(builder, gps_frame.video_time_offset)
+        GoPro.TrackSample.AddGps(builder, frame)
+        track_samples.append(GoPro.TrackSample.TrackSampleEnd(builder))
+
+    GoPro.MetaTrack.StartSamplesVector(builder, len(track_samples))
+    # prepend vector items in reverse order
+    for track_sample in track_samples[::-1]:
+        builder.PrependUOffsetTRelative(track_sample)
+    track_samples_vector = builder.EndVector()
+
+    GoPro.MetaTrack.MetaTrackStart(builder)
+    GoPro.MetaTrack.AddSamples(builder, track_samples_vector)
+    meta_track = GoPro.MetaTrack.MetaTrackEnd(builder)
+
+    builder.Finish(meta_track)
+    return builder.Output()
+
+
+def print_cmd(args):
+    with open(args.file, "rb") as fp:
+        print_gpmf_samples(fp)
+
+
+def gps_json_cmd(args):
+    with open(args.file, "rb") as fp:
+        gps_frames = get_gps_frames(fp, debug=args.debug)
+        # all of our data model is represented with dataclasses, so
+        # asdict() works here.
+        print(json.dumps(gps_frames, indent=2, default=asdict))
+
+
+def gps_analyze_cmd(args):
+    with open(args.file, "rb") as fp:
+        gps_frames = get_gps_frames(fp, debug=args.debug)
+        analyze_gps_frames(gps_frames)
+
+
+def gps_flatbuffers_cmd(args):
+    with open(args.file, "rb") as fp:
+        gps_frames = get_gps_frames(fp, debug=args.debug)
+    with open(args.output, "wb") as fp:
+        fp.write(write_to_flatbuffer(gps_frames))
+    print(f"Written to {args.output}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", type=str, help="print | gps-json | gps-analyze")
-    parser.add_argument("file", type=str, help="MP4 file to parse")
+    parser.set_defaults(run_cmd=parser.print_help)
     parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
         help="Enable debug output",
     )
+
+    subparsers = parser.add_subparsers()
+
+    print_parser = subparsers.add_parser("print")
+    print_parser.add_argument("file", type=str, help="MP4 file to parse")
+    print_parser.set_defaults(run_cmd=print_cmd)
+
+    gps_json_parser = subparsers.add_parser("gps-json")
+    gps_json_parser.add_argument("file", type=str, help="MP4 file to parse")
+    gps_json_parser.set_defaults(run_cmd=gps_json_cmd)
+
+    gps_analyze_parser = subparsers.add_parser("gps-analyze")
+    gps_analyze_parser.add_argument("file", type=str, help="MP4 file to parse")
+    gps_analyze_parser.set_defaults(run_cmd=gps_analyze_cmd)
+
+    gps_flatbuffers_parser = subparsers.add_parser("gps-flatbuffers")
+    gps_flatbuffers_parser.add_argument("file", type=str, help="MP4 file to parse")
+    gps_flatbuffers_parser.add_argument(
+        "output", type=str, help="Flatbuffer file to write to"
+    )
+    gps_flatbuffers_parser.set_defaults(run_cmd=gps_flatbuffers_cmd)
+
     return parser.parse_args()
 
 
 def main(args):
-    with open(args.file, "rb") as fp:
-        if args.command == "print":
-            print_gpmf_samples(fp)
-        elif args.command == "gps-analyze":
-            gps_frames = get_gps_frames(fp, debug=args.debug)
-            analyze_gps_frames(gps_frames)
-        elif args.command == "gps-json":
-            gps_frames = get_gps_frames(fp, debug=args.debug)
-            # all of our data model is represented with dataclasses, so
-            # asdict() works here.
-            print(json.dumps(gps_frames, indent=2, default=asdict))
-        else:
-            raise ValueError(f"Invalid command: {args.command}")
+    args.run_cmd(args)
 
 
 if __name__ == "__main__":
