@@ -15,7 +15,7 @@ table GpsFrame {
     fix:ubyte;
     // unused for now
     //timestamp:string;
-    precision:float;
+    precision:ushort;
     data:[GpsSample];
 }
 

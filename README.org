@@ -19,3 +19,5 @@ podman build -t flatbuffers:24.3.25 .
 #+begin_example
 podman run --rm -it -v "$PWD:/src" flatbuffers:24.3.25 /usr/bin/flatc --python --ts /src/schema.fbs
 #+end_example
+
+This will generate =schema.ts=, =go-pro= containing TypeScript code, and =GoPro= containing Python code.

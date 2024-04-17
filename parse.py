@@ -1121,7 +1121,7 @@ def write_to_flatbuffer(gps_frames: Sequence[GpsFrame]):
     for sample_vector, gps_frame in zip(sample_vector_per_frame, gps_frames):
         GoPro.GpsFrame.GpsFrameStart(builder)
         GoPro.GpsFrame.AddFix(builder, int(gps_frame.fix))
-        GoPro.GpsFrame.AddPrecision(builder, gps_frame.precision)
+        GoPro.GpsFrame.AddPrecision(builder, int(gps_frame.precision))
         GoPro.GpsFrame.AddData(builder, sample_vector)
         frame_vector.append(GoPro.GpsFrame.GpsFrameEnd(builder))
 
