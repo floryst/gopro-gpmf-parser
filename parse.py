@@ -997,8 +997,15 @@ def print_gpmf_samples(fp: io.BufferedRandom):
                     f"Value: {list(str_samples)}",
                 )
             elif not (entry.is_complex_type or entry.is_nested):
-                some_samples = itertools.islice(entry.iter_samples(fp), 5)
-                print("  " * (entry.level + 1), f"Value: {list(some_samples)}")
+                some_samples = list(itertools.islice(entry.iter_samples(fp), 5))
+                remaining = entry.num_samples - len(some_samples)
+                suffix = ""
+                if remaining:
+                    suffix = f", <...{remaining} more>"
+                print(
+                    "  " * (entry.level + 1),
+                    f"Value: [{', '.join(repr(s) for s in some_samples)}{suffix}]",
+                )
 
 
 @dataclass
