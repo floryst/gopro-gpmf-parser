@@ -3,13 +3,17 @@ import bisect
 import io
 import itertools
 import json
+import logging
 import math
 import os
 import struct
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
+from typing import Any, cast, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,7 +41,7 @@ class Q:
         return f"Q({self.v} {self.unit or '(none)'})"
 
 
-def unpack_stream(fmt, stream, peek=False):
+def unpack_stream(fmt: str, stream: io.BufferedReader, peek: bool = False):
     """Unpacks data from a stream."""
     size = struct.calcsize(fmt)
     if peek:
@@ -49,7 +53,7 @@ def unpack_stream(fmt, stream, peek=False):
     return struct.unpack(fmt, buf)
 
 
-def decode_nulterm_bytes(b: bytes, encoding="utf-8"):
+def decode_nulterm_bytes(b: bytes, encoding: str = "utf-8"):
     """Decodes a null-terminated string in a bytes sequence."""
     idx = b.find(b"\x00")
     if idx == -1:
@@ -132,7 +136,7 @@ class Box:
         return self.header.type
 
     @classmethod
-    def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
+    def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader) -> "Box | None":
         reader.seek(hdr.hdr_end)
         return cls(header=hdr, meta_end=hdr.hdr_end)
 
@@ -145,6 +149,8 @@ class FullBox(Box):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = Box.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">4B", reader)
         if not result:
             return None
@@ -165,6 +171,8 @@ class FileTypeBox(Box):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = Box.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">4sI", reader)
         if not result:
             return None
@@ -194,6 +202,8 @@ class HandlerReferenceBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">I4s3I", reader)
         if not result:
             return None
@@ -218,6 +228,8 @@ class SampleEntryBox(Box):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = Box.read_from(reader, hdr)
+        if not box:
+            return None
         # parse reserved
         result = unpack_stream(">6B", reader)
         if not result:
@@ -241,6 +253,8 @@ class SampleDescriptionBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">I", reader)
         if not result:
             return None
@@ -265,6 +279,8 @@ class TimeToEntryBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">I", reader)
         if not result:
             return None
@@ -316,6 +332,8 @@ class SampleToChunkBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">I", reader)
         if not result:
             return None
@@ -355,7 +373,7 @@ class SampleSizeBox(FullBox):
             return self.sample_entry_size[sample_index]
         return self.sample_size
 
-    def iter_sample_sizes(self) -> Iterable[int]:
+    def iter_sample_sizes(self) -> Iterator[int]:
         if self.sample_entry_size:
             return iter(self.sample_entry_size)
         return itertools.repeat(self.sample_size, self.sample_count)
@@ -363,13 +381,15 @@ class SampleSizeBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">2I", reader)
         if not result:
             return None
 
         size = result[0]
         count = result[1]
-        entry_sizes = None
+        entry_sizes: list[int] | None = None
 
         if size == 0:
             entry_sizes = []
@@ -399,12 +419,14 @@ class AbstractChunkOffsetBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         result = unpack_stream(">I", reader)
         if not result:
             return None
 
         count = result[0]
-        chunk_offsets = []
+        chunk_offsets: list[int] = []
         for _ in range(count):
             result = unpack_stream(f">{cls._chunk_offset_size}", reader)
             if not result:
@@ -442,6 +464,8 @@ class MediaHeaderBox(FullBox):
     @classmethod
     def read_from(cls, reader: io.BufferedRandom, hdr: BoxHeader):
         box = FullBox.read_from(reader, hdr)
+        if not box:
+            return None
         if box.version == 1:
             result = unpack_stream(">QQIQ", reader)
         else:
@@ -465,7 +489,7 @@ class MediaHeaderBox(FullBox):
         )
 
 
-box_parsers: Dict[bytes, "Box"] = {
+box_parsers: Dict[bytes, type[Box]] = {
     b"ftyp": FileTypeBox,
     b"hdlr": HandlerReferenceBox,
     b"gmhd": Box,
@@ -483,7 +507,7 @@ box_parsers: Dict[bytes, "Box"] = {
 
 
 @staticmethod
-def parse_box(reader: io.BufferedReader):
+def parse_box(reader: io.BufferedRandom):
     """Parses an MP4 Box."""
     hdr = read_box_header(reader)
     if not hdr:
@@ -491,13 +515,13 @@ def parse_box(reader: io.BufferedReader):
 
     cls = box_parsers.get(hdr.type, None)
     if not cls:
-        # print(f"[WARN] Cannot handle box of type {hdr.type}")
+        # logger.warning("Cannot handle box of type %s", hdr.type)
         return Box.read_from(reader, hdr)
 
     return cls.read_from(reader, hdr)
 
 
-def iterboxes(reader: io.BufferedRandom, container: Box = None) -> Iterable[Box]:
+def iterboxes(reader: io.BufferedRandom, container: Box | None = None) -> Iterable[Box]:
     """Iterates over MP4 boxes."""
     limit = math.inf
     if container:
@@ -541,6 +565,9 @@ def iter_track_samples(
     sample_times_iter = stts.iter_sample_times()
     for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
         samples_per_chunk = stsc.get_samples_per_chunk(idx)
+        if samples_per_chunk is None:
+            logger.warning("Invalid chunk index %d", idx)
+            continue
         sample_offset_in_chunk = 0
         for _ in range(samples_per_chunk):
             sample_size = next(sample_sizes_iter)
@@ -562,6 +589,9 @@ def iter_sample_file_offset(
     sample_sizes_iter = stsz.iter_sample_sizes()
     for idx, chunk_offset in enumerate(cob.entry_chunk_offset):
         samples_per_chunk = stsc.get_samples_per_chunk(idx)
+        if samples_per_chunk is None:
+            logger.warning("Invalid chunk index %d", idx)
+            continue
         sample_offset_in_chunk = 0
         for _ in range(samples_per_chunk):
             sample_size = next(sample_sizes_iter)
@@ -603,7 +633,7 @@ class Scaler:
             return cls()
         return cls(list(scal.iter_samples(fp, apply_modifiers=False)))
 
-    def try_scale(self, it: Any):
+    def try_scale(self, it: Iterable[float | Sequence[float]]):
         """Tries to scale a given input.
 
         If `it' is not a list of ints or floats, the input is passed through as-is.
@@ -611,14 +641,14 @@ class Scaler:
         if not any(isinstance(it, typ) for typ in (tuple, list)):
             return it
 
-        output = []
+        output: list[float] = []
         for value in it:
             if any(isinstance(value, typ) for typ in (int, float)):
-                output.append(value / self.scale[0])
+                output.append(value / self.scale[0])  # type: ignore
             elif any(isinstance(value, typ) for typ in [tuple, list]):
-                output.append(list(val / scal for val, scal in zip(value, self.scale)))
+                output.extend(list(val / scal for val, scal in zip(value, self.scale)))  # type: ignore
             else:
-                output.append(value)
+                output.append(value)  # type: ignore
         return output
 
 
@@ -667,7 +697,7 @@ class GpmfEntry:
         """Prefers display units, then standard units"""
         return self.display_units or self.standard_units
 
-    def get_unit(self, index: int, reader: io.BufferedRandom, encoding="utf-8"):
+    def get_unit(self, index: int, reader: io.BufferedRandom, encoding: str = "utf-8"):
         """Gets a unit for index I of an N-tuple sample."""
         if not self.units:
             return ""
@@ -712,8 +742,8 @@ class GpmfEntry:
     def iter_samples(
         self,
         reader: io.BufferedRandom,
-        apply_modifiers=True,
-        collapse_single_result=True,
+        apply_modifiers: bool = True,
+        collapse_single_result: bool = True,
     ) -> Generator[Any, None, None]:
         """Iterates over the samples in a GPMF entry/frame."""
         if self.is_nested or self.is_complex_type:
@@ -741,10 +771,10 @@ class ComplexGpmfEntry(GpmfEntry):
     complex_type: bytes
 
     def _get_struct_fmt(self):
-        "".join(gpmf_type_to_struct_fmt[type_] for type_ in self.complex_type)
+        return "".join(gpmf_type_to_struct_fmt[type_] for type_ in self.complex_type)
 
 
-def read_gpmf_entry(reader: io.BufferedRandom, pos: int, level=0):
+def read_gpmf_entry(reader: io.BufferedRandom, pos: int, level: int = 0):
     """Reads a GPMF entry at a given position."""
     reader.seek(pos)
     result = unpack_stream(">4scBH", reader)
@@ -769,7 +799,7 @@ def unpack_type_specifier(struct_specifier: bytes):
 
     # states: no_type, has_type, in_array
     state = "no_type"
-    cur_type = None
+    cur_type: bytes | None = None
     while True:
         if state == "no_type":
             ch = next(specifier_iter, None)
@@ -779,6 +809,7 @@ def unpack_type_specifier(struct_specifier: bytes):
                 raise RuntimeError("Encountered invalid type")
             unpacked.append(ch)
             state = "has_type"
+            cur_type = bytes(ch)
         elif state == "has_type":
             ch = next(specifier_iter, None)
             if not ch:
@@ -790,6 +821,8 @@ def unpack_type_specifier(struct_specifier: bytes):
             else:
                 raise RuntimeError("Encountered invalid type")
         elif state == "in_array":
+            if cur_type is None:
+                raise RuntimeError("In array processing without a cur_type!")
             count = 0
             while True:
                 ch = next(specifier_iter)
@@ -807,7 +840,7 @@ def parse_gpmf(
 ) -> Generator[GpmfEntry | None, None, None]:
     """Iterates over the GPMF entries in a file, starting at start_offset."""
 
-    def recurse_parser(start: int, level=0) -> Generator[GpmfEntry, None, None]:
+    def recurse_parser(start: int, level: int = 0) -> Generator[GpmfEntry, None, None]:
         entry = read_gpmf_entry(reader, start, level=level)
         if not entry:
             return None
@@ -815,7 +848,7 @@ def parse_gpmf(
         yield entry
         if entry.is_nested:
             next_level = level + 1
-            type_modifier = None
+            type_modifier: bytes | None = None
             reader.seek(entry.data_start_offset)
             while reader.tell() < entry.data_end_offset_aligned:
                 for child in recurse_parser(reader.tell(), level=next_level):
@@ -825,6 +858,10 @@ def parse_gpmf(
                                 child.get_data_buffer(reader)
                             )
                         elif child.is_complex_type:
+                            if not type_modifier:
+                                raise RuntimeError(
+                                    "No type modifier for the complex type"
+                                )
                             child = ComplexGpmfEntry(
                                 complex_type=type_modifier, **asdict(child)
                             )
@@ -834,7 +871,7 @@ def parse_gpmf(
     yield from recurse_parser(start_offset)
 
 
-def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
+def iter_gopro_meta_samples(fp: io.BufferedRandom):
     """Iterate over the track samples in the GoPro META track."""
     moov = find_box_by_type("moov", iterboxes(fp))
     if not moov:
@@ -848,14 +885,18 @@ def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
         if not mdia:
             continue
 
-        hdlr: HandlerReferenceBox = find_box_by_type("hdlr", iterboxes(fp, mdia))
+        hdlr = cast(
+            HandlerReferenceBox | None, find_box_by_type("hdlr", iterboxes(fp, mdia))
+        )
         if not hdlr:
             continue
 
         if hdlr.handler_type != b"meta" or "GoPro MET" not in hdlr.name:
             continue
 
-        mdhd: MediaHeaderBox = find_box_by_type("mdhd", iterboxes(fp, mdia))
+        mdhd = cast(
+            MediaHeaderBox | None, find_box_by_type("mdhd", iterboxes(fp, mdia))
+        )
         if not mdhd:
             continue
 
@@ -875,7 +916,9 @@ def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
         if not stbl:
             continue
 
-        stsd: SampleDescriptionBox = find_box_by_type("stsd", iterboxes(fp, stbl))
+        stsd = cast(
+            SampleDescriptionBox | None, find_box_by_type("stsd", iterboxes(fp, stbl))
+        )
         if not stsd:
             continue
 
@@ -886,21 +929,28 @@ def iter_gopro_meta_samples(fp: io.BufferedRandom, debug=False):
         if gpmd.type != b"gpmd":
             continue
 
-        stts: TimeToEntryBox = find_box_by_type("stts", iterboxes(fp, stbl))
-        stsc: SampleToChunkBox = find_box_by_type("stsc", iterboxes(fp, stbl))
-        stsz: SampleSizeBox = find_box_by_type("stsz", iterboxes(fp, stbl))
-        stco: ChunkOffsetBox = find_box_by_type("stco", iterboxes(fp, stbl))
-        co64: ChunkLargeOffsetBox = find_box_by_type("co64", iterboxes(fp, stbl))
-        cob: AbstractChunkOffsetBox = co64 or stco
+        stts = cast(
+            TimeToEntryBox | None, find_box_by_type("stts", iterboxes(fp, stbl))
+        )
+        stsc = cast(
+            SampleToChunkBox | None, find_box_by_type("stsc", iterboxes(fp, stbl))
+        )
+        stsz = cast(SampleSizeBox | None, find_box_by_type("stsz", iterboxes(fp, stbl)))
+        stco = cast(
+            ChunkOffsetBox | None, find_box_by_type("stco", iterboxes(fp, stbl))
+        )
+        co64 = cast(
+            ChunkLargeOffsetBox | None, find_box_by_type("co64", iterboxes(fp, stbl))
+        )
+        cob: AbstractChunkOffsetBox | None = co64 or stco
         if not (stts and stsc and stsz and cob):
             continue
 
-        if debug:
-            print("Found GPMF track")
-            print(f"Timescale: {mdhd.timescale}")
-            print(f"Duration: {mdhd.duration}")
-            print(f"There are {cob.entry_count} chunks")
-            print(f"There are {stsz.sample_count} samples")
+        logger.debug("Found GPMF track")
+        logger.debug("Timescale: %d", mdhd.timescale)
+        logger.debug("Duration: %d", mdhd.duration)
+        logger.debug("There are %d chunks", cob.entry_count)
+        logger.debug("There are %d samples", stsz.sample_count)
 
         for sample in iter_track_samples(stsz=stsz, cob=cob, stsc=stsc, stts=stts):
             yield sample
@@ -972,9 +1022,12 @@ def print_gpmf_streams(fp: io.BufferedRandom, sample: Mp4Sample):
 
 
 def print_gpmf_samples(fp: io.BufferedRandom):
-    for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp, debug=True)):
-        print(
-            f"Parsing sample {sample_idx} from {sample.offset} to {sample.offset + sample.size}"
+    for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp)):
+        logger.info(
+            "Parsing sample %d from %d to %d",
+            sample_idx,
+            sample.offset,
+            sample.offset + sample.size,
         )
         for entry in parse_gpmf(fp, sample.offset):
             if not entry:
@@ -1029,17 +1082,15 @@ class GpsFrame:
     data: Sequence[Sample] = field(default_factory=list)
 
 
-def get_gps_frames(fp: io.BufferedRandom, debug=False):
+def get_gps_frames(fp: io.BufferedRandom):
     """Reads out the GPS frames from a GoPro MP4."""
     frames: List[GpsFrame] = []
     for sample_idx, sample in enumerate(iter_gopro_meta_samples(fp)):
-        if debug:
-            print(f"----- sample #{sample_idx} (time={sample.decoding_time})")
+        logger.debug("----- sample #%d (time=%d)", sample_idx, sample.decoding_time)
         for _, entries in iter_gpmf_gps_streams(fp, sample):
             gps_frame = GpsFrame(video_time_offset=sample.decoding_time)
             for entry in entries:
-                if debug:
-                    print(entry)
+                logger.debug(entry)
                 if entry.fourcc == b"GPSF":
                     # should be a single sample
                     gps_frame.fix = next(entry.iter_samples(fp))
@@ -1068,29 +1119,30 @@ def get_gps_frames(fp: io.BufferedRandom, debug=False):
                             )
                         )
             frames.append(gps_frame)
-            if debug:
-                print(gps_frame)
+            logger.debug(gps_frame)
     return frames
 
 
 def analyze_gps_frames(frames: Sequence[GpsFrame]):
     if len(frames) == 0:
-        print("No GPS frames")
+        logger.warning("No GPS frames")
         return
 
     # adds an extra second, since the last sample presumably
     # runs until the end of the second.
     end_time = frames[-1].video_time_offset / 1000 + 1
     gps_data_count = 0
-    per_frame_gps_data_count = Counter()
+    per_frame_gps_data_count: Counter[int] = Counter()
 
     for sample in frames:
         gps_data_count += len(sample.data)
         per_frame_gps_data_count[len(sample.data)] += 1
 
-    print(f"Measured frequency (targeting ~18Hz): {gps_data_count / end_time:.2f}Hz")
-    print(
-        "Samples per frame -> count of frames w/ that # of samples:",
+    logger.info(
+        "Measured frequency (targeting ~18Hz): %.2fHz", gps_data_count / end_time
+    )
+    logger.info(
+        "Samples per frame -> count of frames w/ that # of samples: %r",
         per_frame_gps_data_count,
     )
 
@@ -1153,36 +1205,36 @@ def write_to_flatbuffer(gps_frames: Sequence[GpsFrame]):
     return builder.Output()
 
 
-def print_cmd(args):
+def print_cmd(args: Any):
     with open(args.file, "rb") as fp:
-        print_gpmf_samples(fp)
+        print_gpmf_samples(cast(io.BufferedRandom, fp))
 
 
-def gps_json_cmd(args):
+def gps_json_cmd(args: Any):
     with open(args.file, "rb") as fp:
-        gps_frames = get_gps_frames(fp, debug=args.debug)
+        gps_frames = get_gps_frames(cast(io.BufferedRandom, fp))
         # all of our data model is represented with dataclasses, so
         # asdict() works here.
         print(json.dumps(gps_frames, indent=2, default=asdict))
 
 
-def gps_analyze_cmd(args):
+def gps_analyze_cmd(args: Any):
     with open(args.file, "rb") as fp:
-        gps_frames = get_gps_frames(fp, debug=args.debug)
+        gps_frames = get_gps_frames(cast(io.BufferedRandom, fp))
         analyze_gps_frames(gps_frames)
 
 
-def write_flatbuffer_cmd(args):
+def write_flatbuffer_cmd(args: Any):
     with open(args.file, "rb") as fp:
-        gps_frames = get_gps_frames(fp, debug=args.debug)
+        gps_frames = get_gps_frames(cast(io.BufferedRandom, fp))
     with open(args.output, "wb") as fp:
         fp.write(write_to_flatbuffer(gps_frames))
-    print(f"Written to {args.output}")
+    logger.info("Written to %s", args.output)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.set_defaults(run_cmd=parser.print_help)
+    parser.set_defaults(run_cmd=lambda _: parser.print_help())  # type: ignore
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -1217,7 +1269,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def main(args):
+def main(args: Any):
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
     args.run_cmd(args)
 
 
