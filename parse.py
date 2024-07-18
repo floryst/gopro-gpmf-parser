@@ -1172,7 +1172,7 @@ def gps_analyze_cmd(args):
         analyze_gps_frames(gps_frames)
 
 
-def gps_flatbuffers_cmd(args):
+def write_flatbuffer_cmd(args):
     with open(args.file, "rb") as fp:
         gps_frames = get_gps_frames(fp, debug=args.debug)
     with open(args.output, "wb") as fp:
@@ -1204,12 +1204,15 @@ def parse_args():
     gps_analyze_parser.add_argument("file", type=str, help="MP4 file to parse")
     gps_analyze_parser.set_defaults(run_cmd=gps_analyze_cmd)
 
-    gps_flatbuffers_parser = subparsers.add_parser("gps-flatbuffers")
-    gps_flatbuffers_parser.add_argument("file", type=str, help="MP4 file to parse")
-    gps_flatbuffers_parser.add_argument(
+    write_flatbuffers_parser = subparsers.add_parser(
+        "write-flatbuffer",
+        help="Writes data specified in schema.fbs to an output file.",
+    )
+    write_flatbuffers_parser.add_argument("file", type=str, help="MP4 file to parse")
+    write_flatbuffers_parser.add_argument(
         "output", type=str, help="Flatbuffer file to write to"
     )
-    gps_flatbuffers_parser.set_defaults(run_cmd=gps_flatbuffers_cmd)
+    write_flatbuffers_parser.set_defaults(run_cmd=write_flatbuffer_cmd)
 
     return parser.parse_args()
 
