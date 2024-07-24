@@ -1,26 +1,43 @@
-#+title: GPMF parser
+#+title: GoPro GPMF parser
 
+This is a simple GPMF parser that extracts GPS data from GoPro metadata.
+
+This project is specifically for personal usage, and is made public only for sharing purposes. Unless there is sufficient interest, there is no plan to add new features, test against other GoPro models, or otherwise maintain this project apart from occasional bugfixes.
+
+Supported models:
+- Hero 5 (untested)
+- Fusion (untested)
+- Hero 6 (untested)
+- Hero 7 (untested)
+- Hero 8
+- MAX 2.0 (untested)
+- Hero 9 (untested)
+- Hero 10 (untested)
+- Hero 11 (untested)
 * Parser usage
 Install and initialize the poetry environment.
 
 #+begin_example
-poetry run python ./parse.py print | gps-json | gps-analyze | write-flatbuffers
+poetry run python ./parse.py [print | gps-json | gps-analyze | write-flatbuffers] <gopro mp4 file>
   print: outputs the GPMF frames to stdout
   gps-json: outputs GPS stream frames as JSON to stdout
   gps-analyze: outputs human-readable GPS stats
   write-flatbuffers: outputs a flatbuffer representation of the GPS info.
 #+end_example
-
 * GPS data in flatbuffers
-Flatbuffers provide a zero-copy means of packing, transmitting and reading the GPS data, since the JSON encoding is a lot of data.
+Flatbuffers provide a zero-copy means of packing, transmitting and reading the GPS data. The flatbuffers project supports codegen from a given schema.
 ** Building flatbuffers
 #+begin_example
 cd flatbuffers/
-podman build -t flatbuffers:24.3.25 .
+$DOCKER build -t flatbuffers:24.3.25 .
 #+end_example
 ** Running flatbuffers
 #+begin_example
-podman run --rm -it -v "$PWD:/src" flatbuffers:24.3.25 /usr/bin/flatc --python --ts /src/schema.fbs
+$DOCKER run --rm -it -v "$PWD:/src" flatbuffers:24.3.25 /usr/bin/flatc --python --ts /src/schema.fbs
 #+end_example
 
 This will generate =schema.ts=, =go-pro= containing TypeScript code, and =GoPro= containing Python code.
+* Follow-on work
+- [ ] extract and output orientation information
+* References
+- [[https://github.com/gopro/gpmf-parser/][gopro/gpmf-parser]]
