@@ -1111,8 +1111,8 @@ def get_gps_frames(fp: io.BufferedRandom):
                             )
                         gps_frame.data.append(
                             GpsFrame.Sample(
-                                longitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
-                                latitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
+                                latitude=Q(gpmf_sample[0], entry.get_unit(0, fp)),
+                                longitude=Q(gpmf_sample[1], entry.get_unit(1, fp)),
                                 altitude=Q(gpmf_sample[2], entry.get_unit(2, fp)),
                                 speed_2d=Q(gpmf_sample[3], entry.get_unit(3, fp)),
                                 speed_3d=Q(gpmf_sample[4], entry.get_unit(4, fp)),
